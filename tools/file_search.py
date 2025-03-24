@@ -8,7 +8,7 @@ from typing import Optional
 import logging
 from dotenv import load_dotenv
 from openai import OpenAI
-from agents import function_tool, RunContextWrapper
+from c1do1_agents import function_tool, RunContextWrapper
 
 # Configure logging
 logger = logging.getLogger("file_search")

@@ -3,11 +3,11 @@ Simple web search agent using Tavily search API.
 This agent is designed to be used as a handoff target for other agents.
 """
 
-from agents import Agent, Runner
+from c1do1_agents import Agent, Runner
 import asyncio
 from dotenv import load_dotenv
 import os
-from agents import set_default_openai_key
+from c1do1_agents import set_default_openai_key
 
 # Import the Tavily search tool
 from tools.tavily_search import tavily_search

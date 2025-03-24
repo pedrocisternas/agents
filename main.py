@@ -33,21 +33,21 @@ set_default_openai_key(openai_api_key)
 # Create the Simple Response Agent (Tier 1)
 simple_response_agent = Agent(
     name="Simple Response Agent",
-    instructions="""You are the first-tier customer support agent for C1DO1 company.
-Your job is to handle simple queries, greetings, and basic information requests.
+    instructions="""Eres el primer nivel de atención al cliente para la empresa C1DO1.
+Tu trabajo es manejar consultas simples, saludos e información básica.
 
-You should be able to handle:
-- Greetings and pleasantries
-- Simple questions about business hours
-- Basic product information requests
-- Simple price inquiries
-- Simple contact information
+Debes ser capaz de manejar:
+- Saludos y cortesías
+- Preguntas simples sobre horarios de atención
+- Información básica sobre productos
+- Consultas simples de precios
+- Información de contacto básica
 
-If a question is complex or requires specific knowledge about C1DO1 products, 
-services, or company information, respond with:
-"I'll need to transfer you to our specialist team for that question."
+Si una pregunta es compleja o requiere conocimiento específico sobre productos de C1DO1, 
+servicios o información de la empresa, responde con:
+"Voy a consultar con nuestro equipo de especialistas para esa pregunta."
 
-Always be friendly, professional, and concise. Respond in the same language as the question.
+Sé amable, profesional y conciso. Responde siempre en español.
 """,
     model="gpt-4o"
 )
@@ -76,6 +76,7 @@ async def process_simple_query(query):
         "let me connect you",
         # Spanish indicators
         "necesitaré transferirte",
+        "voy a consultar con nuestro equipo",
         "equipo de especialistas",
         "nuestros expertos",
         "necesito más información",
@@ -97,10 +98,13 @@ async def get_human_response(query):
     Returns:
         The human's response
     """
-    print("\n[SE REQUIERE ASISTENTE HUMANO]")
-    print(f"Consulta: {query}")
-    print("Por favor proporciona tu respuesta de experto:")
-    human_response = input("Tu respuesta: ")
+    print("\n" + "="*60)
+    print("  [INTERFAZ DE ASISTENTE HUMANO - NO VISIBLE PARA EL USUARIO]")
+    print("="*60)
+    print(f"\n  Consulta del usuario: {query}")
+    print("\n  Por favor proporciona tu respuesta de experto:")
+    human_response = input("\n  Tu respuesta: ")
+    print("\n" + "="*60 + "\n")
     return human_response
 
 def get_context_summary(conversation_history, max_messages=4):
@@ -124,6 +128,17 @@ def get_context_summary(conversation_history, max_messages=4):
     summary += f"Último mensaje: '{recent_messages[-1]['content'][:30]}{'...' if len(recent_messages[-1]['content']) > 30 else ''}'"
     
     return summary
+
+def print_system_separator(title):
+    """
+    Print a visually distinctive separator for system logs.
+    
+    Args:
+        title: The title to display in the separator
+    """
+    print("\n" + "-"*60)
+    print(f"  [SISTEMA - {title}]")
+    print("-"*60)
 
 async def main():
     """
@@ -152,8 +167,18 @@ async def main():
             simple_response, needs_escalation = await process_simple_query(user_message)
             
             if needs_escalation:
-                print("Agente Simple: " + simple_response)
-                print(f"[Sistema: Escalando al Agente de Conocimiento | Contexto: {get_context_summary(conversation_history)}]")
+                # Iniciar proceso de handoff con separador visual
+                print_system_separator("INICIO DE HANDOFF INTERNO")
+                
+                # Mostrar mensaje interno del agente simple (solo para operadores)
+                print(f"\n  Agente Simple decidió escalar con respuesta: \n  \"{simple_response}\"")
+                
+                # Mostrar al usuario un mensaje genérico (sin indicar transferencia)
+                print("\n  Mensaje para usuario:", end=" ")
+                print("Agente Simple: Un momento por favor, estoy procesando tu consulta.")
+                
+                # Log del escalado en la terminal (solo para operadores)
+                print(f"\n  Escalando al Agente de Conocimiento | Contexto: {get_context_summary(conversation_history)}")
                 
                 try:
                     # Process through Complex Response Agent
@@ -163,14 +188,19 @@ async def main():
                     )
                     
                     if needs_human_help:
-                        print("Agente de Conocimiento: " + complex_response)
-                        print("[Sistema: Escalando al Agente Humano]")
+                        # Mostrar mensaje interno del agente de conocimiento (solo para operadores)
+                        print(f"\n  Agente de Conocimiento decidió escalar con respuesta: \n  \"{complex_response}\"")
+                        print("\n  Escalando al Agente Humano")
+                        
+                        # Cerrar separador del handoff interno
+                        print("-"*60 + "\n")
                         
                         # Get response from human (you)
                         human_response = await get_human_response(user_message)
                         
                         # Store the human response in the vector database for future use
-                        print("[Sistema: Almacenando respuesta humana en la base de datos vectorial...]")
+                        print_system_separator("ALMACENAMIENTO")
+                        print("\n  Almacenando respuesta humana en la base de datos vectorial...")
                         success, file_id = await store_in_vector_database(
                             user_message, 
                             human_response,
@@ -178,17 +208,28 @@ async def main():
                         )
                         
                         if success:
-                            print(f"[Sistema: Respuesta almacenada con éxito, ID: {file_id}]")
+                            print(f"\n  Respuesta almacenada con éxito, ID: {file_id}")
                         else:
-                            print("[Sistema: Error al almacenar en la base de datos]")
+                            print("\n  Error al almacenar en la base de datos")
                         
+                        print("-"*60 + "\n")
+                        
+                        # Mostrar respuesta al usuario
                         print("Agente Humano: " + human_response)
                         conversation_history.append({"role": "assistant", "content": human_response})
                     else:
+                        # Cerrar separador del handoff interno
+                        print("\n  Respuesta encontrada en la base de conocimiento.")
+                        print("-"*60 + "\n")
+                        
+                        # Mostrar respuesta al usuario
                         print("Agente de Conocimiento: " + complex_response)
                         conversation_history.append({"role": "assistant", "content": complex_response})
                 except Exception as e:
-                    print(f"[ERROR: No se pudo procesar con el Agente de Conocimiento: {str(e)}]")
+                    # Cerrar separador del handoff interno
+                    print(f"\n  ERROR: No se pudo procesar con el Agente de Conocimiento: {str(e)}")
+                    print("-"*60 + "\n")
+                    
                     print("Agente Simple: Lo siento, estoy teniendo problemas para conectar con nuestro equipo especializado. Por favor, inténtalo de nuevo más tarde.")
             else:
                 print("Agente Simple: " + simple_response)

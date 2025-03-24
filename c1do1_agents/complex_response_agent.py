@@ -34,25 +34,23 @@ set_default_openai_key(openai_api_key)
 # Create the Complex Response Agent
 complex_response_agent = Agent(
     name="C1DO1 Knowledge Specialist",
-    instructions=f"""You are a specialist support agent for C1DO1 company with access to the company knowledge base.
-Your job is to handle detailed queries about C1DO1's products, services, and company information.
+    instructions=f"""Eres un agente especializado de soporte para la empresa C1DO1 con acceso a su base de conocimientos.
+Tu trabajo es manejar consultas detalladas sobre los productos, servicios e información de la empresa C1DO1.
 
-Search the company knowledge base for information using the file_search tool.
-The vector store ID to use is: {vector_store_id}
+Busca información en la base de conocimientos de la empresa usando la herramienta file_search.
+El ID de la base de datos vectorial a utilizar es: {vector_store_id}
 
-IMPORTANT: Be extremely strict about when you can answer:
+IMPORTANTE: Sé extremadamente estricto sobre cuándo puedes responder:
 
-1. ONLY answer if you find SPECIFIC information directly related to the user's query in the knowledge base.
-2. If you find general information that is not specifically related to the user's exact question, DO NOT attempt to answer.
-3. If you need to make assumptions or provide generic advice, DO NOT answer.
-4. If you use phrases like "I don't have specific information", "I couldn't find", "I don't have details", you MUST transfer to a human.
+1. SOLO responde si encuentras información ESPECÍFICA directamente relacionada con la consulta del usuario en la base de conocimientos.
+2. Si encuentras información general que no está específicamente relacionada con la pregunta exacta del usuario, NO intentes responder.
+3. Si necesitas hacer suposiciones o proporcionar consejos genéricos, NO respondas.
+4. Si no encuentras información específica, responde exactamente con:
+   "Lo siento, no tengo la información específica para responder a tu pregunta. Necesitaré transferirte a un especialista humano que pueda ayudarte mejor."
 
-If you CANNOT find SPECIFIC information in the knowledge base after searching, ALWAYS respond with:
-"I apologize, but I don't have the specific information to answer your question accurately. Let me transfer you to a human specialist who can assist you better."
+Nunca proporciones pasos generales de solución de problemas o consejos genéricos si no tienes información específica.
 
-Never provide general troubleshooting steps or generic advice if you don't have specific information.
-
-Always be professional, thorough, and respond in the same language as the question.
+Sé siempre profesional, detallado y responde siempre en español.
 """,
     model="gpt-4o",
     tools=[file_search]
@@ -108,56 +106,37 @@ async def process_complex_query(query, conversation_history=None):
     
     # Check if the response indicates human help is needed
     human_help_indicators = [
-        # English indicators
+        # Spanish indicators
+        "transferirte a un especialista humano",
+        "transferirte a un humano",
+        "especialista humano",
+        "no tengo la información específica",
+        "no tengo información específica",
+        "no tengo suficiente información",
+        "no puedo encontrar",
+        "no he encontrado",
+        "no encontré información específica",
+        "no encontré",
+        "no tengo la información",
+        "no dispongo de información",
+        "no encuentro información",
+        "sin información específica",
+        "no hay información específica",
+        # English indicators (for backwards compatibility)
         "transfer you to a human",
         "human specialist",
         "don't have enough information",
         "don't have the specific information",
         "cannot find information",
         "couldn't find",
-        "don't have specific",
-        "don't have details",
-        "not found specific",
-        "unable to find",
-        "no specific information",
-        # Spanish indicators
-        "no tengo suficiente información",
-        "no tengo la información específica",
-        "no tengo información específica",
-        "no puedo encontrar",
-        "no he encontrado",
-        "no encontré información específica",
-        "no encontré",
-        "transferirte a un especialista humano",
-        "transferirte a un humano",
-        "especialista humano",
-        "no tengo la información",
-        "no dispongo de información",
-        "no encuentro información",
-        "sin información específica",
-        "no hay información específica"
+        "don't have specific"
     ]
     
-    # Also force human help if the agent admits lack of information  
-    lack_info_indicators = [
-        "parece que no encontré",
-        "no he podido encontrar",
-        "no pude encontrar",
-        "it seems I couldn't find",
-        "I haven't been able to find",
-        "I wasn't able to find",
-        "I could not find"
-    ]
+    needs_human_help = any(indicator.lower() in response.lower() for indicator in human_help_indicators)
     
-    needs_human_help = any(indicator.lower() in response.lower() for indicator in human_help_indicators + lack_info_indicators)
-    
-    # If the agent admits lack of information but isn't explicitly stating a transfer,
-    # replace the response with a standard transfer message
-    if any(indicator.lower() in response.lower() for indicator in lack_info_indicators) and not any(indicator.lower() in response.lower() for indicator in human_help_indicators):
-        if "spanish" in response.lower() or any(spanish_word in response.lower() for spanish_word in ["gracias", "ayuda", "información", "específica"]):
-            response = "Lo siento, no tengo la información específica para responder a tu pregunta. Voy a transferirte a un especialista humano que podrá ayudarte mejor."
-        else:
-            response = "I apologize, but I don't have the specific information to answer your question accurately. Let me transfer you to a human specialist who can assist you better."
+    # Si la respuesta está en inglés, traducirla al español
+    if "I apologize" in response or "I'm sorry" in response or response.startswith("I "):
+        response = "Lo siento, no tengo la información específica para responder a tu pregunta. Necesitaré transferirte a un especialista humano que pueda ayudarte mejor."
         needs_human_help = True
     
     return response, needs_human_help
