@@ -18,6 +18,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents import Runner, set_default_openai_key, HandoffSpanData
 from agents_c1do1.simple_response_agent import simple_response_agent
 from agents_c1do1.human_support_agent import human_support_agent
+from agents_c1do1.keisy_vector_storage import store_keisy_answer
 
 # Load environment variables
 load_dotenv()
@@ -86,6 +87,9 @@ async def process_query(query, conversation_history=None):
     # Reset tracker
     tracker.reset()
     
+    # Store the original question for potential vector storage
+    original_question = query
+    
     # Prepare context if available
     if conversation_history:
         context = "\n\nHistorial de conversación anterior:\n"
@@ -141,6 +145,19 @@ async def process_query(query, conversation_history=None):
         print("-------")
         keisy_response = input("Respuesta de Keisy: ")
         print("--------")
+        
+        # Store Keisy's answer in the vector database (new functionality)
+        try:
+            print("Almacenando respuesta de Keisy en la base de datos vectorial...")
+            success, message = store_keisy_answer(original_question, keisy_response)
+            if success:
+                print(f"✅ {message}")
+            else:
+                print(f"⚠️ {message}")
+        except Exception as e:
+            print(f"⚠️ Error al almacenar respuesta: {str(e)}")
+            # Continue with the conversation even if storage fails
+            
         return keisy_response
     
     # The result will contain the final response after all handoffs (if any)
