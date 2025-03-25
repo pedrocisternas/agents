@@ -1,242 +1,223 @@
 """
-WhatsApp Agent System for C1DO1
+Main execution file for the C1DO1 agent system.
 
-This system simulates a WhatsApp business messaging platform with multiple tiers of agents:
-1. Simple Response Agent - handles basic queries and greetings
-2. Complex Response Agent - handles detailed queries using vector database knowledge
-3. Human Handoff - for queries that can't be answered automatically
-4. Learning System - stores human answers in vector database for future use
+This script demonstrates the agent workflow with proper handoffs
+according to the OpenAI Agents SDK best practices.
+It accepts user input from the terminal in an interactive loop.
 """
 
 import os
 import asyncio
+import sys
+import json
 from dotenv import load_dotenv
 
-# Importar la biblioteca OpenAI Agents de forma estándar
-from agents import Agent, Runner, set_default_openai_key
-
-# Importar nuestros agentes personalizados
-from c1do1_agents.complex_response_agent import process_complex_query
-from c1do1_agents.vector_storage_agent import store_in_vector_database
+from agents import Runner, set_default_openai_key, HandoffSpanData
+from utility_agents.simple_response_agent import simple_response_agent
+from utility_agents.human_support_agent import human_support_agent
+from utils.qa_vector_storage import store_support_answer
 
 # Load environment variables
 load_dotenv()
 
 # Get OpenAI API key
 openai_api_key = os.environ.get("OPENAI_API_KEY")
+
 if not openai_api_key:
     raise ValueError("OPENAI_API_KEY not found in environment variables")
 
 # Set the default OpenAI API key
 set_default_openai_key(openai_api_key)
 
-# Create the Simple Response Agent (Tier 1)
-simple_response_agent = Agent(
-    name="Simple Response Agent",
-    instructions="""Eres el primer nivel de atención al cliente para la empresa C1DO1.
-Tu trabajo es manejar consultas simples, saludos e información básica.
+# Custom run result handler to gather logs
+class RunTracker:
+    def __init__(self):
+        self.handoffs = []
+        self.vector_results = []
+        self.agent_names = []
+        self.contexts = []
+    
+    def reset(self):
+        self.handoffs = []
+        self.vector_results = []
+        self.agent_names = []
+        self.contexts = []
+    
+    def format_internal_logs(self):
+        """Format internal logs for display"""
+        logs = []
+        
+        # Add context
+        if self.contexts:
+            logs.append("Contexto: " + "\n".join(self.contexts))
+        
+        # Add handoffs
+        if self.handoffs:
+            logs.append("Handoffs: " + " -> ".join(self.handoffs))
+        
+        # Add agent names
+        if self.agent_names:
+            logs.append("Agentes utilizados: " + ", ".join(self.agent_names))
+        
+        # Add vector search results
+        if self.vector_results:
+            logs.append("Resultados de búsqueda en vectores: ")
+            for result in self.vector_results:
+                logs.append(f"- {result}")
+        
+        return "\n".join(logs)
 
-Debes ser capaz de manejar:
-- Saludos y cortesías
-- Preguntas simples sobre horarios de atención
-- Información básica sobre productos
-- Consultas simples de precios
-- Información de contacto básica
+# Create tracker
+tracker = RunTracker()
 
-Si una pregunta es compleja o requiere conocimiento específico sobre productos de C1DO1, 
-servicios o información de la empresa, responde con:
-"Voy a consultar con nuestro equipo de especialistas para esa pregunta."
-
-Sé amable, profesional y conciso. Responde siempre en español.
-""",
-    model="gpt-4o"
-)
-
-async def process_simple_query(query):
+async def process_query(query, conversation_history=None):
     """
-    Process a query through the Simple Response Agent.
+    Process a user query through the agent workflow.
     
     Args:
-        query: User's message/query
+        query: The user's message/query
+        conversation_history: List of previous conversation messages
         
     Returns:
-        response: Agent's response
-        needs_escalation: Boolean indicating if query needs escalation to next tier
+        The final response from the agent workflow
     """
-    result = await Runner.run(simple_response_agent, input=query)
-    response = result.final_output
+    # Reset tracker
+    tracker.reset()
     
-    # Check if the response indicates escalation is needed
-    escalation_indicators = [
-        # English indicators
-        "I'll need to transfer you",
-        "specialist team",
-        "one of our experts",
-        "need more information to assist",
-        "let me connect you",
-        # Spanish indicators
-        "necesitaré transferirte",
-        "voy a consultar con nuestro equipo",
-        "equipo de especialistas",
-        "nuestros expertos",
-        "necesito más información",
-        "te conectaré",
-        "debo transferirte"
-    ]
+    # Store the original question for potential vector storage
+    original_question = query
     
-    needs_escalation = any(indicator.lower() in response.lower() for indicator in escalation_indicators)
+    # Prepare context if available
+    if conversation_history:
+        context = "\n\nHistorial de conversación anterior:\n"
+        for i, (user_msg, assistant_msg) in enumerate(conversation_history[-3:]):  # Show last 3 exchanges
+            context += f"Usuario: {user_msg}\nAsistente: {assistant_msg}\n"
+        context += f"\nConsulta actual: {query}"
+        tracker.contexts.append("Conversación previa incluida")
+        result = await Runner.run(simple_response_agent, input=context)
+    else:
+        context = query
+        result = await Runner.run(simple_response_agent, input=query)
     
-    return response, needs_escalation
-
-async def get_human_response(query):
-    """
-    Simulate getting a response from a human agent (you).
+    # Log the last agent name
+    last_agent_name = getattr(result.last_agent, 'name', 'Unknown')
+    print(f"\nAgente actual: '{last_agent_name}'")
     
-    Args:
-        query: The user's question
+    # Track the initial agent
+    tracker.agent_names.append(simple_response_agent.name)
+    
+    # Extract tool results from the run result
+    vector_search_results = []
+    
+    # Go through the items in the run result
+    for item in result.new_items:        
+        # Track handoffs
+        if hasattr(item, 'to_agent') and hasattr(item, 'from_agent'):
+            handoff_from = getattr(item.from_agent, 'name', 'Unknown')
+            handoff_to = getattr(item.to_agent, 'name', 'Unknown')
+            tracker.handoffs.append(f"{handoff_from} → {handoff_to}")
+            tracker.agent_names.append(handoff_to)
         
-    Returns:
-        The human's response
-    """
-    print("\n" + "="*60)
-    print("  [INTERFAZ DE ASISTENTE HUMANO - NO VISIBLE PARA EL USUARIO]")
-    print("="*60)
-    print(f"\n  Consulta del usuario: {query}")
-    print("\n  Por favor proporciona tu respuesta de experto:")
-    human_response = input("\n  Tu respuesta: ")
-    print("\n" + "="*60 + "\n")
-    return human_response
-
-def get_context_summary(conversation_history, max_messages=4):
-    """
-    Generate a summary of the conversation context being passed.
+        # Track file search results
+        if hasattr(item, 'type') and item.type == 'file_search_call':
+            try:
+                if hasattr(item, 'results') and item.results:
+                    for result_item in item.results:
+                        if hasattr(result_item, 'text') and result_item.text:
+                            # Get a snippet (first 100 chars)
+                            text_snippet = result_item.text[:100] + "..." if len(result_item.text) > 100 else result_item.text
+                            filename = getattr(result_item, 'filename', 'unknown')
+                            score = getattr(result_item, 'score', 0)
+                            vector_search_results.append(f"Archivo: {filename}, Relevancia: {score:.2f}, Extracto: {text_snippet}")
+            except Exception as e:
+                vector_search_results.append(f"Error al procesar resultados: {str(e)}")
     
-    Args:
-        conversation_history: The conversation history
-        max_messages: Maximum number of messages to include
+    # Store vector search results
+    tracker.vector_results = vector_search_results
+    
+    # Check if the last agent was Keisy
+    if hasattr(result.last_agent, 'name') and result.last_agent.name == human_support_agent.name:
+        print("\n------")
+        print("TERMINAL DE KEISY")
+        print("-------")
+        keisy_response = input("Respuesta de Keisy: ")
+        print("--------")
         
-    Returns:
-        A summary string of the context
-    """
-    if not conversation_history or len(conversation_history) == 0:
-        return "Sin contexto previo"
+        # Store Keisy's answer in the vector database (new functionality)
+        try:
+            print("Almacenando respuesta de Keisy en la base de datos vectorial...")
+            success, message = store_support_answer(
+                original_question, 
+                keisy_response,
+                source="Keisy - Especialista Humano"
+            )
+            if success:
+                print(f"✅ {message}")
+            else:
+                print(f"⚠️ {message}")
+        except Exception as e:
+            print(f"⚠️ Error al almacenar respuesta: {str(e)}")
+            # Continue with the conversation even if storage fails
+            
+        return keisy_response
     
-    recent_messages = conversation_history[-max_messages:] if len(conversation_history) > max_messages else conversation_history
-    
-    summary = f"{len(recent_messages)} mensajes de contexto | "
-    summary += f"{sum(len(msg['content']) for msg in recent_messages)} caracteres totales | "
-    summary += f"Último mensaje: '{recent_messages[-1]['content'][:30]}{'...' if len(recent_messages[-1]['content']) > 30 else ''}'"
-    
-    return summary
+    # The result will contain the final response after all handoffs (if any)
+    return result.final_output
 
-def print_system_separator(title):
+async def interactive_mode():
     """
-    Print a visually distinctive separator for system logs.
-    
-    Args:
-        title: The title to display in the separator
+    Run the agent in interactive mode, accepting input from the terminal.
     """
-    print("\n" + "-"*60)
-    print(f"  [SISTEMA - {title}]")
-    print("-"*60)
-
-async def main():
-    """
-    Main function to run the WhatsApp agent system.
-    Simulates a chat interface in the terminal.
-    """
-    print("\n===== Sistema de Soporte WhatsApp C1DO1 =====")
-    print("(Escribe 'salir' en cualquier momento para terminar)")
-    print("Ingresa tu mensaje como si estuvieras enviando por WhatsApp:\n")
+    print("=== Sistema de Agentes C1DO1 - Modo Interactivo ===")
+    print("Este sistema sigue las mejores prácticas del SDK de Agentes de OpenAI")
+    print("implementando handoffs apropiados entre agentes.\n")
+    print("Escribe 'salir', 'exit' o 'quit' para terminar la conversación.\n")
     
     conversation_history = []
     
     while True:
-        # Get user input
-        user_message = input("Tú: ")
-        
-        if user_message.lower() in ["salir", "exit"]:
-            print("\n¡Gracias por usar el Soporte de C1DO1. ¡Hasta pronto!")
-            break
-        
-        # Add user message to conversation history
-        conversation_history.append({"role": "user", "content": user_message})
-        
-        try:    
-            # Process through Simple Response Agent first
-            simple_response, needs_escalation = await process_simple_query(user_message)
+        try:
+            # Get user input
+            user_input = input("\nUsuario: ")
             
-            if needs_escalation:
-                # Iniciar proceso de handoff con separador visual
-                print_system_separator("INICIO DE HANDOFF INTERNO")
-                
-                # Mostrar mensaje interno del agente simple (solo para operadores)
-                print(f"\n  Agente Simple decidió escalar con respuesta: \n  \"{simple_response}\"")
-                
-                # Mostrar al usuario un mensaje genérico (sin indicar transferencia)
-                print("\n  Mensaje para usuario:", end=" ")
-                print("Agente Simple: Un momento por favor, estoy procesando tu consulta.")
-                
-                # Log del escalado en la terminal (solo para operadores)
-                print(f"\n  Escalando al Agente de Conocimiento | Contexto: {get_context_summary(conversation_history)}")
-                
-                try:
-                    # Process through Complex Response Agent
-                    complex_response, needs_human_help = await process_complex_query(
-                        user_message, 
-                        conversation_history
-                    )
-                    
-                    if needs_human_help:
-                        # Mostrar mensaje interno del agente de conocimiento (solo para operadores)
-                        print(f"\n  Agente de Conocimiento decidió escalar con respuesta: \n  \"{complex_response}\"")
-                        print("\n  Escalando al Agente Humano")
-                        
-                        # Cerrar separador del handoff interno
-                        print("-"*60 + "\n")
-                        
-                        # Get response from human (you)
-                        human_response = await get_human_response(user_message)
-                        
-                        # Store the human response in the vector database for future use
-                        print_system_separator("ALMACENAMIENTO")
-                        print("\n  Almacenando respuesta humana en la base de datos vectorial...")
-                        success, file_id = await store_in_vector_database(
-                            user_message, 
-                            human_response,
-                            {"conversation_history": conversation_history}
-                        )
-                        
-                        if success:
-                            print(f"\n  Respuesta almacenada con éxito, ID: {file_id}")
-                        else:
-                            print("\n  Error al almacenar en la base de datos")
-                        
-                        print("-"*60 + "\n")
-                        
-                        # Mostrar respuesta al usuario
-                        print("Agente Humano: " + human_response)
-                        conversation_history.append({"role": "assistant", "content": human_response})
-                    else:
-                        # Cerrar separador del handoff interno
-                        print("\n  Respuesta encontrada en la base de conocimiento.")
-                        print("-"*60 + "\n")
-                        
-                        # Mostrar respuesta al usuario
-                        print("Agente de Conocimiento: " + complex_response)
-                        conversation_history.append({"role": "assistant", "content": complex_response})
-                except Exception as e:
-                    # Cerrar separador del handoff interno
-                    print(f"\n  ERROR: No se pudo procesar con el Agente de Conocimiento: {str(e)}")
-                    print("-"*60 + "\n")
-                    
-                    print("Agente Simple: Lo siento, estoy teniendo problemas para conectar con nuestro equipo especializado. Por favor, inténtalo de nuevo más tarde.")
-            else:
-                print("Agente Simple: " + simple_response)
-                conversation_history.append({"role": "assistant", "content": simple_response})
+            # Check if the user wants to exit
+            if user_input.lower() in ['salir', 'exit', 'quit']:
+                print("\n¡Hasta luego! Gracias por usar el sistema de agentes C1DO1.")
+                break
+            
+            print("\n-------")
+            print("Procesando...")
+            
+            # Process the user's query
+            response = await process_query(user_input, conversation_history)
+            
+            # Display internal logs
+            internal_logs = tracker.format_internal_logs()
+            print(internal_logs)
+            print("---------")
+            
+            # Display the response to the user
+            print(f"Agente: {response}")
+            
+            # Store the conversation
+            conversation_history.append((user_input, response))
+            
+        except KeyboardInterrupt:
+            print("\n\n¡Hasta luego! Gracias por usar el sistema de agentes C1DO1.")
+            break
         except Exception as e:
-            print(f"[ERROR: {str(e)}]")
-            print("Sistema: Lo siento, he encontrado un error. Por favor, inténtalo de nuevo.")
+            print(f"\n❌ Error: {str(e)}")
+            print("Por favor, intenta nuevamente.")
+
+async def main():
+    """
+    Main function to run the interactive mode.
+    """
+    await interactive_mode()
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n\n¡Hasta luego! Gracias por usar el sistema de agentes C1DO1.")
+        sys.exit(0)

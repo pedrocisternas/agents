@@ -8,7 +8,7 @@ It transfers more complex queries to the Complex Response Agent.
 from agents import Agent
 from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 
-from agents_c1do1.complex_response_agent import complex_response_agent
+from .complex_response_agent import complex_response_agent
 
 # Create the Simple Response Agent
 simple_response_agent = Agent(

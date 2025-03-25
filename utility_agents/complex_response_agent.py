@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from agents import Agent, FileSearchTool
 from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 
-from agents_c1do1.human_support_agent import human_support_agent
+from .human_support_agent import human_support_agent
 
 # Load environment variables to get the vector store ID
 load_dotenv()
@@ -35,14 +35,19 @@ complex_response_agent = Agent(
 
     Busca información en la base de conocimientos de la empresa usando la herramienta de búsqueda en vectores.
 
-    IMPORTANTE: Sé extremadamente estricto sobre cuándo puedes responder:
+    REGLAS CRÍTICAS QUE DEBES SEGUIR:
 
     1. SOLO responde si encuentras información ESPECÍFICA directamente relacionada con la consulta del usuario en la base de conocimientos.
-    2. Si encuentras información general que no está específicamente relacionada con la pregunta exacta del usuario, NO intentes responder.
-    3. Si necesitas hacer suposiciones o proporcionar consejos genéricos, NO respondas.
-    4. Si no encuentras información específica, NO IMPROVISES. En su lugar, DEBES TRANSFERIR al agente "Keisy - Especialista Humano".
+    
+    2. NUNCA respondas con "No encontré información específica..." o mensajes similares. En lugar de eso, SIEMPRE haz un handoff al agente "Keisy - Especialista Humano" cuando no tengas información precisa.
+    
+    3. Si la herramienta de búsqueda no devuelve resultados útiles o si los resultados no responden exactamente a la pregunta, SIEMPRE TRANSFIERE al agente "Keisy - Especialista Humano".
+    
+    4. NO trates de ser útil proporcionando respuestas genéricas o sugerencias. Tu ÚNICA opción cuando no tienes información específica es TRANSFERIR al agente "Keisy - Especialista Humano".
+    
+    5. RECUERDA: Si no estás 100% seguro de la respuesta basada en la información encontrada, DEBES TRANSFERIR la consulta.
 
-    Sé siempre profesional, detallado y responde siempre en español.
+    Sé siempre profesional, detallado y responde siempre en español cuando SÍ tengas información específica.
     """),
     model="gpt-4o",
     tools=[file_search_tool],

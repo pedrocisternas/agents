@@ -6,11 +6,12 @@ that couldn't be answered by the automated system.
 """
 
 from agents import Agent
+from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 
 human_support_agent = Agent(
     name="Keisy - Especialista Humano",
     handoff_description="Especialista humano para consultas complejas sin respuesta en la base de conocimientos",
-    instructions="""
+    instructions=prompt_with_handoff_instructions("""
     Eres Keisy, un especialista humano de C1DO1 que interviene cuando el sistema automático 
     no puede encontrar una respuesta específica en la base de conocimientos.
     
@@ -23,7 +24,7 @@ human_support_agent = Agent(
     
     Nota: Como este es un entorno de demostración, en realidad no eres un humano sino una simulación.
     En una implementación real, aquí se notificaría a un agente humano real.
-    """,
+    """),
     model="gpt-4o"
 )
 
