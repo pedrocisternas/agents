@@ -98,8 +98,11 @@ async def process_query(query, conversation_history=None):
         context = query
         result = await Runner.run(simple_response_agent, input=query)
     
-    # Extract handoffs and tool results from the run result
-    handoff_to_keisy = False
+    # Log the last agent name
+    last_agent_name = getattr(result.last_agent, 'name', 'Unknown')
+    print(f"\nAgente actual: '{last_agent_name}'")
+    
+    # Extract tool results from the run result
     vector_search_results = []
     
     # Track the initial agent
@@ -111,11 +114,6 @@ async def process_query(query, conversation_history=None):
         if hasattr(item, 'to_agent') and hasattr(item, 'from_agent'):
             handoff_from = getattr(item.from_agent, 'name', 'Unknown')
             handoff_to = getattr(item.to_agent, 'name', 'Unknown')
-            
-            # Check specifically for handoff to Keisy
-            if handoff_to == human_support_agent.name:
-                handoff_to_keisy = True
-                
             tracker.handoffs.append(f"{handoff_from} → {handoff_to}")
             tracker.agent_names.append(handoff_to)
         
@@ -136,8 +134,8 @@ async def process_query(query, conversation_history=None):
     # Store vector search results
     tracker.vector_results = vector_search_results
     
-    # If there was a handoff to Keisy, prompt for human input
-    if handoff_to_keisy:
+    # Check if the last agent was Keisy
+    if hasattr(result.last_agent, 'name') and result.last_agent.name == human_support_agent.name:
         print("\n------")
         print("TERMINAL DE KEISY")
         print("-------")
