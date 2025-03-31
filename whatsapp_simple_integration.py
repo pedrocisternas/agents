@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 import threading
 import queue
 import time
+import requests
+import uuid
 
 # Añadir el directorio raíz al path para importar los módulos
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
@@ -42,6 +44,12 @@ load_dotenv()
 openai_api_key = os.environ.get("OPENAI_API_KEY")
 if not openai_api_key:
     raise ValueError("OPENAI_API_KEY no encontrada en variables de entorno")
+
+# Configuración Notion
+NOTION_API_KEY = os.environ.get("NOTION_API_KEY")
+NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID")
+if not NOTION_API_KEY or not NOTION_DATABASE_ID:
+    logger.warning("Credenciales de Notion no encontradas, la integración con Notion no estará disponible")
 
 # Establecer la API key por defecto
 set_default_openai_key(openai_api_key)
@@ -179,10 +187,6 @@ async def process_webhook(request):
                                             'recipient': recipient_id,
                                             'timestamp': datetime.now().isoformat()
                                         }
-                        
-                        # CASO 3: Procesar confirmaciones de mensajes (para obtener el contenido)
-                        # Nota: Esta parte es teórica ya que WhatsApp no proporciona el contenido en los webhooks de status
-                        # Se incluye como placeholder para futura implementación si se encontrara una forma alternativa
         
         # Devolver 200 OK para confirmar recepción
         return web.Response(status=200, text="OK")
@@ -190,6 +194,326 @@ async def process_webhook(request):
     except Exception as e:
         logger.error(f"Error al procesar webhook: {str(e)}")
         return web.Response(status=500, text=f"Error: {str(e)}")
+
+# Agregar endpoint para recibir webhooks desde Notion
+async def process_notion_webhook(request):
+    """
+    Procesa los webhooks recibidos desde Notion cuando se responde a un ticket.
+    """
+    try:
+        # Verificar el header de seguridad
+        notion_secret = request.headers.get('X-Notion-Secret')
+        if notion_secret != 'soporte123':
+            logger.warning(f"Intento de acceso no autorizado al webhook de Notion: header incorrecto")
+            return web.Response(status=403, text="Acceso no autorizado")
+        
+        # Obtener el cuerpo de la solicitud
+        body = await request.json()
+        logger.info(f"Webhook recibido desde Notion: {json.dumps(body)}")
+        
+        # Extraer los datos necesarios del payload
+        try:
+            # Acceder a las propiedades directamente de los datos de Notion
+            properties = body.get('data', {}).get('properties', {})
+            if not properties:
+                # Si no se encuentra en data.properties, intentar acceder directamente a properties
+                properties = body.get('properties', {})
+            
+            # Mostrar información de todos los datos recibidos para depuración
+            print("\n" + "="*70)
+            print("📑 DATOS RECIBIDOS DE NOTION:")
+            print(f"• Estructura de datos: {body.keys()}")
+            
+            if 'data' in body:
+                print(f"• Estructura de data: {body['data'].keys()}")
+                if 'properties' in body['data']:
+                    print(f"• Campos en data.properties: {body['data']['properties'].keys()}")
+            
+            print(f"• Campos en properties: {properties.keys()}")
+            print("-"*70)
+            
+            # Buscar el número de teléfono
+            telefono = ""
+            
+            # Primero intentar con el nuevo campo Celular
+            celular_field = properties.get('Celular', {})
+            if celular_field and 'rich_text' in celular_field and celular_field['rich_text']:
+                telefono = celular_field['rich_text'][0].get('text', {}).get('content', '')
+                print(f"• Valor de celular extraído: {telefono}")
+            
+            # Si no se encuentra, intentar con el campo Teléfono antiguo
+            if not telefono:
+                # Lista de posibles variantes del campo Teléfono
+                telefono_variants = ["Teléfono", "Telefono", "teléfono", "telefono", "Tel\u00e9fono"]
+                for variant in telefono_variants:
+                    if variant in properties:
+                        telefono_field = properties[variant]
+                        if 'rich_text' in telefono_field and telefono_field['rich_text']:
+                            telefono = telefono_field['rich_text'][0].get('text', {}).get('content', '')
+                            print(f"• Valor de teléfono extraído desde '{variant}': {telefono}")
+                            break
+            
+            # Si aún no se encuentra, buscar por formato de número
+            if not telefono:
+                print("• Buscando número por patrón numérico...")
+                for field_name, field_value in properties.items():
+                    if isinstance(field_value, dict) and 'rich_text' in field_value and field_value['rich_text']:
+                        content = field_value['rich_text'][0].get('text', {}).get('content', '')
+                        if content and len(content) > 8 and all(c.isdigit() or c == '+' for c in content):
+                            telefono = content
+                            print(f"• Encontrado número en campo '{field_name}': {telefono}")
+                            break
+            
+            # Intentar extraer dato del teléfono del cuerpo completo si aún no se encuentra
+            if not telefono:
+                print("• Buscando teléfono en el cuerpo JSON completo...")
+                json_str = json.dumps(body)
+                import re
+                phone_patterns = [
+                    r'"content"\s*:\s*"(5\d{10})"',  # Número chileno
+                    r'"content"\s*:\s*"(\+?\d{8,15})"'  # Cualquier número de teléfono
+                ]
+                for pattern in phone_patterns:
+                    matches = re.findall(pattern, json_str)
+                    if matches:
+                        telefono = matches[0]
+                        print(f"• Encontrado número mediante expresión regular: {telefono}")
+                        break
+            
+            # Obtener respuesta
+            respuesta = ""
+            respuesta_field = properties.get('Respuesta', {})
+            if respuesta_field and 'rich_text' in respuesta_field and respuesta_field['rich_text']:
+                respuesta = respuesta_field['rich_text'][0].get('text', {}).get('content', '')
+                print(f"• Respuesta extraída: \"{respuesta}\"")
+            
+            # Si no se encuentra la respuesta, buscarla en el cuerpo completo
+            if not respuesta:
+                print("• Buscando respuesta en el cuerpo JSON completo...")
+                json_str = json.dumps(body)
+                import re
+                resp_match = re.search(r'"content"\s*:\s*"([^"]{2,100})"', json_str)
+                if resp_match:
+                    respuesta = resp_match.group(1)
+                    # Evitar IDs o números de teléfono
+                    if not respuesta.startswith(("id", "ID")) and not all(c.isdigit() or c == '-' for c in respuesta):
+                        print(f"• Posible respuesta encontrada: \"{respuesta}\"")
+            
+            # Obtener pregunta
+            pregunta = ""
+            pregunta_field = properties.get('Pregunta', {})
+            if pregunta_field and 'title' in pregunta_field and pregunta_field['title']:
+                pregunta = pregunta_field['title'][0].get('text', {}).get('content', '')
+                print(f"• Pregunta extraída: \"{pregunta}\"")
+            
+            print("="*70 + "\n")
+            
+            # Verificar si tenemos los datos mínimos necesarios
+            if not telefono:
+                logger.error("No se encontró número de teléfono en el webhook de Notion")
+                # Último recurso: sacar de los pending_queries
+                if 'data' in body and 'id' in body['data']:
+                    page_id = body['data']['id']
+                    print(f"• Buscando página por ID: {page_id} en consultas pendientes...")
+                    
+                    # Buscar si hay algún número pendiente
+                    if pending_human_queries:
+                        print(f"• Números pendientes: {list(pending_human_queries.keys())}")
+                        # Si solo hay uno pendiente, usarlo
+                        if len(pending_human_queries) == 1:
+                            telefono = list(pending_human_queries.keys())[0]
+                            print(f"• Usando único número pendiente: {telefono}")
+                    
+                # Si todavía no hay teléfono, error
+                if not telefono:
+                    return web.Response(status=400, text="No se pudo identificar el número de teléfono")
+            
+            if not respuesta:
+                logger.error("No se encontró respuesta en el webhook de Notion")
+                return web.Response(status=400, text="No se encontró la respuesta en el webhook")
+            
+            # Procesar la respuesta
+            logger.info(f"Procesando respuesta de Notion para {telefono}: {respuesta}")
+            await process_notion_response(telefono, pregunta, respuesta)
+            
+            return web.Response(status=200, text="OK")
+        
+        except Exception as e:
+            logger.error(f"Error al procesar datos del webhook de Notion: {str(e)}")
+            # Imprimir el traceback completo
+            import traceback
+            print(f"❌ ERROR EN WEBHOOK DE NOTION: {str(e)}")
+            print(traceback.format_exc())
+            return web.Response(status=400, text=f"Error: {str(e)}")
+    
+    except Exception as e:
+        logger.error(f"Error al procesar webhook de Notion: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+        return web.Response(status=500, text=f"Error interno: {str(e)}")
+
+async def process_notion_response(telefono, pregunta, respuesta):
+    """
+    Procesa una respuesta recibida desde Notion.
+    
+    Args:
+        telefono: Número de teléfono del usuario
+        pregunta: La pregunta original
+        respuesta: La respuesta proporcionada en Notion
+    """
+    try:
+        # Verificar si el número está en los pendientes
+        if telefono in pending_human_queries:
+            logger.info(f"Procesando respuesta de Notion para usuario {telefono}")
+            print("\n" + "="*70)
+            print(f"📥 RECIBIDA RESPUESTA DE NOTION PARA {telefono}")
+            print("="*70)
+            print(f"• Pregunta original: \"{pregunta}\"")
+            print(f"• Respuesta: \"{respuesta}\"")
+            print("-"*70)
+            
+            # Si la pregunta está vacía, intentar recuperarla de pending_human_queries
+            if not pregunta and telefono in pending_human_queries:
+                pregunta = pending_human_queries[telefono].get('question', '')
+                print(f"ℹ️ Recuperada pregunta original de historial: \"{pregunta}\"")
+            
+            # Almacenar la respuesta en la base de datos vectorial
+            try:
+                print(f"📊 Almacenando respuesta de Notion en base de datos vectorial...")
+                success, message = store_support_answer(
+                    pregunta,
+                    respuesta,
+                    source="Soporte Humano - Notion"
+                )
+                if success:
+                    print(f"✅ {message}")
+                else:
+                    print(f"⚠️ {message}")
+            except Exception as e:
+                logger.error(f"Error al almacenar respuesta: {str(e)}")
+                print(f"❌ Error al almacenar respuesta: {str(e)}")
+            
+            try:
+                # Enviar la respuesta al usuario
+                print(f"📤 Enviando respuesta al usuario {telefono}...")
+                success = await send_whatsapp_response(telefono, respuesta)
+                
+                if success:
+                    # Actualizar historial de conversación
+                    conversation_histories.setdefault(telefono, []).append((pregunta, respuesta))
+                    
+                    # Eliminar de la lista de pendientes
+                    del pending_human_queries[telefono]
+                    if telefono in original_questions:
+                        del original_questions[telefono]
+                    
+                    print(f"✅ Respuesta de Notion enviada al usuario {telefono} correctamente")
+                else:
+                    logger.error(f"Error al enviar respuesta de Notion a {telefono}")
+                    print(f"❌ Error al enviar respuesta de Notion a {telefono}")
+            
+            except Exception as e:
+                logger.error(f"Error al enviar respuesta de Notion: {str(e)}")
+                print(f"❌ Error al enviar respuesta de Notion: {str(e)}")
+                
+            print("="*70 + "\n")
+        else:
+            logger.warning(f"Recibida respuesta para número no pendiente: {telefono}")
+            print(f"⚠️ Recibida respuesta para usuario no pendiente: {telefono}")
+    
+    except Exception as e:
+        logger.error(f"Error al procesar respuesta de Notion: {str(e)}")
+        print(f"❌ Error al procesar respuesta de Notion: {str(e)}")
+
+def create_notion_ticket(phone_number, question):
+    """
+    Crea un ticket en la base de datos de Notion.
+    
+    Args:
+        phone_number: Número de teléfono del usuario
+        question: Pregunta o consulta del usuario
+        
+    Returns:
+        str: ID de la página creada en Notion o None si hay un error
+    """
+    if not NOTION_API_KEY or not NOTION_DATABASE_ID:
+        logger.error("No se puede crear ticket en Notion: credenciales no configuradas")
+        print("❌ No se puede crear ticket en Notion: API key o Database ID no configurados")
+        return None
+    
+    if not phone_number or not question:
+        logger.error("No se puede crear ticket en Notion: faltan datos (teléfono o pregunta)")
+        print("❌ No se puede crear ticket en Notion: faltan datos necesarios")
+        return None
+    
+    try:
+        # Generar ID único para el ticket
+        ticket_id = str(uuid.uuid4())
+        
+        # Configurar cabeceras y URL
+        headers = {
+            "Authorization": f"Bearer {NOTION_API_KEY}",
+            "Content-Type": "application/json",
+            "Notion-Version": "2022-06-28"
+        }
+        url = f"https://api.notion.com/v1/pages"
+        
+        # Preparar datos para la creación del ticket
+        data = {
+            "parent": {"database_id": NOTION_DATABASE_ID},
+            "properties": {
+                "Pregunta": {
+                    "title": [
+                        {
+                            "text": {
+                                "content": question
+                            }
+                        }
+                    ]
+                },
+                "Respuesta": {
+                    "rich_text": []
+                },
+                "Celular": {  # Cambiado de "Teléfono" a "Celular"
+                    "rich_text": [
+                        {
+                            "text": {
+                                "content": phone_number
+                            }
+                        }
+                    ]
+                },
+                "ID": {
+                    "rich_text": [
+                        {
+                            "text": {
+                                "content": ticket_id
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+        
+        # Realizar solicitud a la API de Notion
+        response = requests.post(url, headers=headers, json=data)
+        
+        # Verificar respuesta
+        if response.status_code == 200:
+            page_id = response.json().get("id")
+            logger.info(f"Ticket creado en Notion con ID: {page_id}")
+            print(f"✅ Ticket creado en Notion para {phone_number}")
+            return page_id
+        else:
+            logger.error(f"Error al crear ticket en Notion: {response.status_code} - {response.text}")
+            print(f"❌ Error al crear ticket en Notion: respuesta {response.status_code}")
+            print(f"   Detalle: {response.text[:200]}...")
+            return None
+    
+    except Exception as e:
+        logger.error(f"Excepción al crear ticket en Notion: {str(e)}")
+        print(f"❌ Excepción al crear ticket en Notion: {str(e)}")
+        return None
 
 def process_message_with_agents(message_data):
     """
@@ -293,59 +617,31 @@ def process_message_with_agents(message_data):
                         'timestamp': datetime.now().isoformat()
                     }
                     
-                    # Mostrar en terminal alerta para soporte humano con opción de respuesta inmediata
+                    # Mostrar en terminal alerta para soporte humano
                     print("\n" + "="*70)
-                    print("🔔 ALERTA: SE REQUIERE RESPUESTA HUMANA - RESPONDA DIRECTAMENTE AQUÍ")
+                    print("🔔 ALERTA: SE REQUIERE RESPUESTA HUMANA - DERIVANDO A NOTION")
                     print("="*70)
                     print(f"• Usuario: {from_number}")
                     print(f"• Consulta: \"{message_text}\"")
                     print(f"• Fecha/Hora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     print("-"*70)
                     
-                    # Solicitar respuesta directamente en la terminal
-                    human_response = input("📝 Ingrese su respuesta (o presione Enter para responder más tarde): ")
+                    # Crear ticket en Notion
+                    notion_page_id = create_notion_ticket(from_number, message_text)
                     
-                    # Si se proporciona una respuesta inmediata
-                    if human_response.strip():
-                        print("✅ Procesando respuesta...")
+                    if notion_page_id:
+                        print("✅ Se ha creado un ticket en Notion para responder a esta consulta")
+                        print("   Un agente humano responderá a través de Notion")
                         
-                        # Almacenar la respuesta en la base de datos vectorial
-                        try:
-                            success, message = store_support_answer(
-                                message_text,
-                                human_response,
-                                source="Soporte Humano - Terminal"
-                            )
-                            if success:
-                                print(f"✅ {message}")
-                            else:
-                                print(f"⚠️ {message}")
-                        except Exception as e:
-                            print(f"⚠️ Error al almacenar respuesta: {str(e)}")
-                        
-                        # Enviar respuesta al usuario
-                        new_loop.run_until_complete(
-                            send_whatsapp_response(from_number, human_response)
-                        )
-                        
-                        # Actualizar historial de conversación
-                        conversation_histories.setdefault(from_number, []).append((message_text, human_response))
-                        
-                        # Eliminar de la lista de pendientes
-                        del pending_human_queries[from_number]
-                        if from_number in original_questions:
-                            del original_questions[from_number]
-                        
-                        print("✅ Respuesta enviada al usuario correctamente")
                     else:
-                        print("⚠️ No se proporcionó respuesta. La consulta queda pendiente.")
-                        print("   Ingrese respuesta más tarde cuando esté disponible.")
+                        print("⚠️ No se pudo crear el ticket en Notion")
+                        print("   La consulta queda pendiente de respuesta manual")
                         
-                        # Informamos al usuario que estamos procesando su consulta
+                        # Informamos al usuario con un mensaje diferente en caso de error
                         new_loop.run_until_complete(
                             send_whatsapp_response(
                                 from_number, 
-                                "Estamos procesando tu consulta. Un especialista humano te responderá en breve. Gracias por tu paciencia."
+                                "Tu consulta requiere asistencia especializada. Un humano revisará tu caso y te responderá lo antes posible. Gracias por tu paciencia."
                             )
                         )
                     
@@ -443,6 +739,9 @@ async def send_whatsapp_response(to_number, message_text):
     Args:
         to_number: Número de destino
         message_text: Texto del mensaje
+        
+    Returns:
+        bool: True si el mensaje se envió correctamente, False en caso contrario
     """
     try:
         # Obtener ID del teléfono de WhatsApp Business
@@ -497,6 +796,9 @@ async def start_webhook_server(host='0.0.0.0', port=8080):
     app.router.add_get('/webhook', verify_webhook)
     app.router.add_post('/webhook', process_webhook)
     
+    # Ruta para webhook de Notion
+    app.router.add_post('/notion-webhook', process_notion_webhook)
+    
     # Iniciar el servidor
     runner = web.AppRunner(app)
     await runner.setup()
@@ -504,6 +806,7 @@ async def start_webhook_server(host='0.0.0.0', port=8080):
     await site.start()
     
     logger.info(f"Servidor webhook iniciado en http://{host}:{port}")
+    print(f"Endpoint de Notion disponible en: http://{host}:{port}/notion-webhook")
     
     return runner
 
@@ -513,21 +816,29 @@ async def main():
     """
     # Imprimir información
     print("\n" + "="*70)
-    print("🤖 SISTEMA DE AGENTES C1DO1 CON INTEGRACIÓN WHATSAPP Y SOPORTE HUMANO DIRECTO")
+    print("🤖 SISTEMA DE AGENTES C1DO1 CON INTEGRACIÓN WHATSAPP Y NOTION")
     print("="*70)
     print("Este sistema procesa mensajes de WhatsApp a través del sistema de agentes C1DO1")
-    print("y permite respuestas manuales directamente desde la terminal cuando es necesario.")
+    print("y crea tickets en Notion para respuestas humanas cuando es necesario.")
     
     # Inicializar diccionario para mensajes salientes
     global outgoing_message_ids
     outgoing_message_ids = {}
     
     print("\n📋 IMPORTANTE:")
-    print("  • Las consultas que requieran respuesta humana se mostrarán en esta terminal")
-    print("  • Puede responder directamente ingresando la respuesta cuando se le solicite")
+    print("  • Las consultas que requieran respuesta humana se registrarán en Notion")
+    print("  • Responda desde Notion usando el botón 'Enviar Respuesta'")
     print("  • Las respuestas se almacenarán en la base de datos vectorial automáticamente")
     print("  • Este servidor debe ser accesible desde internet")
     print("  • Asegúrate de que ngrok esté corriendo")
+    
+    # Verificar integración con Notion
+    if not NOTION_API_KEY or not NOTION_DATABASE_ID:
+        print("\n⚠️ ADVERTENCIA: Integración con Notion no configurada")
+        print("  • Comprueba que las variables NOTION_API_KEY y NOTION_DATABASE_ID")
+        print("    estén correctamente establecidas en tu archivo .env")
+    else:
+        print("\n✅ Integración con Notion configurada correctamente")
     
     # Verificar si hay consultas pendientes para mostrar
     if pending_human_queries:
@@ -545,10 +856,6 @@ async def main():
     processor_thread = threading.Thread(target=message_processor_thread, daemon=True)
     processor_thread.start()
     
-    # Iniciar manejador de consultas pendientes
-    pending_handler_thread = threading.Thread(target=pending_queries_handler, daemon=True)
-    pending_handler_thread.start()
-    
     # Iniciar servidor webhook
     runner = await start_webhook_server()
     
@@ -564,94 +871,6 @@ async def main():
         # Cerrar el servidor correctamente
         await runner.cleanup()
         logger.info("Servidor detenido correctamente")
-
-# Añadir función para manejar consultas pendientes
-def pending_queries_handler():
-    """
-    Hilo para manejar consultas pendientes que no fueron respondidas inmediatamente.
-    Permite responder consultas pendientes en cualquier momento.
-    """
-    logger.info("Iniciando manejador de consultas pendientes")
-    
-    while True:
-        try:
-            # Comprobar si hay consultas pendientes cada 30 segundos
-            if pending_human_queries:
-                print("\n" + "="*70)
-                print("🔄 CONSULTAS PENDIENTES DE RESPUESTA:")
-                print("="*70)
-                
-                numbers_to_process = list(pending_human_queries.keys())
-                
-                for i, number in enumerate(numbers_to_process):
-                    query_data = pending_human_queries.get(number)
-                    if not query_data:
-                        continue
-                    
-                    print(f"[{i+1}] Usuario: {number}")
-                    print(f"    Consulta: \"{query_data['question']}\"")
-                    print(f"    Fecha: {datetime.fromisoformat(query_data['timestamp']).strftime('%Y-%m-%d %H:%M:%S')}")
-                    print("-"*70)
-                
-                print("\nPara responder a una consulta, ingrese el número correspondiente")
-                print("o presione Enter para continuar sin responder.")
-                choice = input("Selección: ")
-                
-                if choice.strip() and choice.isdigit():
-                    idx = int(choice) - 1
-                    if 0 <= idx < len(numbers_to_process):
-                        selected_number = numbers_to_process[idx]
-                        question = pending_human_queries[selected_number]['question']
-                        
-                        print(f"\n• Respondiendo a {selected_number}")
-                        print(f"• Consulta: \"{question}\"")
-                        human_response = input("📝 Ingrese su respuesta: ")
-                        
-                        if human_response.strip():
-                            print("✅ Procesando respuesta...")
-                            
-                            # Almacenar la respuesta en la base de datos vectorial
-                            try:
-                                success, message = store_support_answer(
-                                    question,
-                                    human_response,
-                                    source="Soporte Humano - Terminal"
-                                )
-                                if success:
-                                    print(f"✅ {message}")
-                                else:
-                                    print(f"⚠️ {message}")
-                            except Exception as e:
-                                print(f"⚠️ Error al almacenar respuesta: {str(e)}")
-                            
-                            # Enviar respuesta al usuario
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            try:
-                                loop.run_until_complete(
-                                    send_whatsapp_response(selected_number, human_response)
-                                )
-                            finally:
-                                loop.close()
-                            
-                            # Actualizar historial de conversación
-                            conversation_histories.setdefault(selected_number, []).append((question, human_response))
-                            
-                            # Eliminar de la lista de pendientes
-                            del pending_human_queries[selected_number]
-                            if selected_number in original_questions:
-                                del original_questions[selected_number]
-                            
-                            print("✅ Respuesta enviada al usuario correctamente")
-                        else:
-                            print("⚠️ No se proporcionó respuesta. La consulta sigue pendiente.")
-            
-            # Esperar antes de verificar nuevamente
-            time.sleep(30)
-        
-        except Exception as e:
-            logger.error(f"Error en el manejador de consultas pendientes: {str(e)}")
-            time.sleep(30)  # Continuar a pesar del error
 
 if __name__ == "__main__":
     try:
