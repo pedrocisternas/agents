@@ -167,6 +167,19 @@ async def send_whatsapp_message(to_phone_number, message_text=None, phone_number
     Returns:
         dict: La respuesta de la API de WhatsApp
     """
+    # Forzar recarga del archivo .env para asegurar que tenemos el token más reciente
+    # Solo si no se proporcionó un token específico
+    if not access_token:
+        try:
+            # Recargar variables de entorno para asegurar token actualizado
+            load_dotenv(override=True)
+            # Obtener el token recargado
+            access_token = os.environ.get("WHATSAPP_ACCESS_TOKEN")
+            token_preview = f"{access_token[:5]}...{access_token[-5:]}" if access_token and len(access_token) > 10 else "NO TOKEN"
+            logger.info(f"Token recargado desde .env: {token_preview}")
+        except Exception as e:
+            logger.error(f"Error al recargar variables de entorno: {str(e)}")
+    
     client = WhatsAppClient(phone_number_id=phone_number_id, access_token=access_token)
     return await client.send_message(to_phone_number, message_text, template_name)
 
